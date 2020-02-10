@@ -12,26 +12,54 @@ import (
 )
 
 func main() {
-	response, err := http.Get("https://api.github.com/search/repositories?q=stars:>=1000+language:go&sort=stars&order=desc")
-	if err != nil {
-		log.Fatal(err)
+	repositories := make(chan string)
+	go func() {
+		for i := 0; i < 50; i++ {
+			repositories <- "."
+		}
+		close(repositories)
+	}()
+
+	for n := range repositories {
+		log.Println(n)
+	}
+}
+
+func main2() {
+	page := 1
+	size := 50
+	more := true
+	for more == true {
+		url := fmt.Sprintf("https://api.github.com/search/repositories?q=stars:>=1000+language:go&sort=stars&order=desc&per_page=%d&page=%d", size, page)
+		response, err := http.Get(url)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		body, err := ioutil.ReadAll(response.Body)
+		defer response.Body.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if response.StatusCode != http.StatusOK {
+			log.Fatal("Unexpected status code", response.StatusCode)
+		}
+
+		data := JSONData{}
+		err = json.Unmarshal(body, &data)
+		if err != nil {
+			log.Fatal(err)
+		}
+		printData(data)
+
+		if data.Count > (page * size) {
+			log.Println("Requesting new page...")
+		} else {
+			more = false
+		}
+		page++
 	}
 
-	body, err := ioutil.ReadAll(response.Body)
-	defer response.Body.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK {
-		log.Fatal("Unexpected status code", response.StatusCode)
-	}
-
-	data := JSONData{}
-	err = json.Unmarshal(body, &data)
-	if err != nil {
-		log.Fatal(err)
-	}
-	printData(data)
 }
 
 func printData(data JSONData) {
