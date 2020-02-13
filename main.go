@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -11,80 +12,87 @@ import (
 	"time"
 )
 
+const size = 50
+
 func main() {
-	repositories := make(chan string)
+	token := flag.String("token", "", "GitHub Access Token")
+	flag.Parse()
+
+	if *token == "" {
+		log.Fatal("invalid token")
+	}
+
+	responses := make(chan GitHubResponse)
 	go func() {
-		for i := 0; i < 50; i++ {
-			repositories <- "."
+		page := 1
+		more := true
+		for more {
+			url := fmt.Sprintf("https://api.github.com/search/repositories?q=stars:>=1000+language:go&sort=stars&order=desc&per_page=%d&page=%d", size, page)
+			request, _ := http.NewRequest("GET", url, nil)
+			request.Header.Add("Authorization", fmt.Sprintf("token %s", *token))
+
+			client := http.Client{}
+			response, err := client.Do(request)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			body, err := ioutil.ReadAll(response.Body)
+			defer response.Body.Close()
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// check for errors on the response
+			if response.StatusCode != http.StatusOK {
+				ghError := GitHubErrorResponse{}
+				_ = json.Unmarshal(body, &ghError)
+				log.Fatal(fmt.Sprintf("Unexpected status code: %v", ghError), response.StatusCode)
+			}
+
+			// extract the results and send them to the chan
+			var ghResponse GitHubResponse
+			err = json.Unmarshal(body, &ghResponse)
+			if err != nil {
+				log.Fatal(err)
+			}
+			responses <- ghResponse
+
+			// check if we should keep looking for
+			if ghResponse.Count > (page*size) && (page+1)*size <= 1000 {
+				page++
+			} else {
+				more = false
+			}
 		}
-		close(repositories)
+		close(responses)
 	}()
 
-	for n := range repositories {
-		log.Println(n)
-	}
-}
-
-func main2() {
-	page := 1
-	size := 50
-	more := true
-	for more == true {
-		url := fmt.Sprintf("https://api.github.com/search/repositories?q=stars:>=1000+language:go&sort=stars&order=desc&per_page=%d&page=%d", size, page)
-		response, err := http.Get(url)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		body, err := ioutil.ReadAll(response.Body)
-		defer response.Body.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-		if response.StatusCode != http.StatusOK {
-			log.Fatal("Unexpected status code", response.StatusCode)
-		}
-
-		data := JSONData{}
-		err = json.Unmarshal(body, &data)
-		if err != nil {
-			log.Fatal(err)
-		}
-		printData(data)
-
-		if data.Count > (page * size) {
-			log.Println("Requesting new page...")
-		} else {
-			more = false
-		}
-		page++
-	}
-
-}
-
-func printData(data JSONData) {
-	log.Printf("Repositories found: %d", data.Count)
+	// print out the incoming results
 	const format = "%v\t%v\t%v\t%v\t\n"
 	tw := new(tabwriter.Writer).Init(os.Stdout, 0, 8, 2, ' ', 0)
 	fmt.Fprintf(tw, format, "Repository", "Stars", "Created at", "Description")
-	fmt.Fprintf(tw, format, "----------", "-----", "----------", "----------")
-	for _, i := range data.Items {
-		desc := i.Description
-		if len(desc) > 50 {
-			desc = string(desc[:50]) + "..."
+	fmt.Fprintf(tw, format, "----------", "-----", "----------", "-----------")
+	for response := range responses {
+		for _, i := range response.Items {
+			desc := i.Description
+			if len(desc) > 50 {
+				desc = string(desc[:50]) + "..."
+			}
+			t, err := time.Parse(time.RFC3339, i.CreatedAt)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Fprintf(tw, format, i.FullName, i.StargazersCount, t.Year(), desc)
 		}
-		t, err := time.Parse(time.RFC3339, i.CreatedAt)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Fprintf(tw, format, i.FullName, i.StargazersCount, t.Year(), desc)
 	}
 	tw.Flush()
 }
 
-// Owner is the repository owner
-type Owner struct {
-	Login string
+// GitHubResponse contains the GitHub API response.
+type GitHubResponse struct {
+	Count int `json:"total_count"`
+	Items []Item
 }
 
 // Item is the single repository data structure
@@ -92,14 +100,20 @@ type Item struct {
 	ID              int
 	Name            string
 	FullName        string `json:"full_name"`
-	Owner           Owner
 	Description     string
 	CreatedAt       string `json:"created_at"`
 	StargazersCount int    `json:"stargazers_count"`
 }
 
-// JSONData contains the GitHub API response
-type JSONData struct {
-	Count int `json:"total_count"`
-	Items []Item
+// GitHubErrorResponse contains the GitHub API error response.
+type GitHubErrorResponse struct {
+	Message string `json:"message"`
+	Errors  []ErrorItem
+}
+
+// ErrorItem represents the an error detail on the GitHub API error response.
+type ErrorItem struct {
+	Resource string
+	Field    string
+	Code     string
 }
